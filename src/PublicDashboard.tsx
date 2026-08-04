@@ -1,4 +1,4 @@
-import { useState, useMemo, type ReactNode } from "react";
+import { useState, useEffect, useMemo, type ReactNode } from "react";
 
 /*
   PUBLIC MARINETERREIN DASHBOARD — single kiosk page, 1080x1920.
@@ -28,9 +28,6 @@ const STATUS_ORDER: StatusKey[] = ["light", "moderate", "busy", "crowded"];
 type VisitorThresholds = { light: number; moderate: number; busy: number };
 const VISITOR_THRESHOLDS: Record<string, VisitorThresholds> = {
   "MT-Picnic/Voorwerf": { light: 36, moderate: 250, busy: 429 },
-  "MT-Boardwalk": { light: 20, moderate: 160, busy: 300 },
-  "MT-Shuttercam": { light: 45, moderate: 300, busy: 550 },
-  "MT-Terrace": { light: 60, moderate: 430, busy: 780 },
 };
 
 function statusForCount(count: number, thresholds: VisitorThresholds): StatusKey {
@@ -94,9 +91,6 @@ function statusForWeather(tempC: number): WeatherStatus {
 type LocationData = { count: number; x: number; y: number };
 const MOCK_LOCATIONS: Record<string, LocationData> = {
   "MT-Picnic/Voorwerf": { count: 180, x: 34, y: 30 },
-  "MT-Boardwalk": { count: 40, x: 18, y: 62 },
-  "MT-Shuttercam": { count: 480, x: 55, y: 48 },
-  "MT-Terrace": { count: 120, x: 68, y: 66 },
 };
 const MOCK_WATER_TEMP = 17.4;
 const MOCK_WEATHER = { tempC: 22, condition: "partly-cloudy" };
@@ -109,15 +103,65 @@ type DashboardData = {
   soundDb: number;
 };
 
-function useMockLiveData(): DashboardData {
-  // Swap this hook's internals for real fetches on an interval, keeping
-  // the same return shape.
-  const [data] = useState<DashboardData>({
+type LiveSummary = {
+  currentVisitors: number;
+  soundDb: number | null;
+  waterTempC: number | null;
+  weatherTempC: number | null;
+  generatedAt: string;
+};
+
+const LIVE_SUMMARY_URL = "/api/public/live-summary";
+const REFRESH_INTERVAL_MS = 60 * 1000;
+
+function useLiveData(): DashboardData {
+  const [data, setData] = useState<DashboardData>({
     locations: MOCK_LOCATIONS,
     waterTempC: MOCK_WATER_TEMP,
     weather: MOCK_WEATHER,
     soundDb: MOCK_SOUND_DB,
   });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function poll() {
+      try {
+        const res = await fetch(LIVE_SUMMARY_URL);
+        if (!res.ok) throw new Error(`live-summary returned ${res.status}`);
+        const summary: LiveSummary = await res.json();
+        if (cancelled) return;
+
+        setData((prev) => ({
+          // MT-Picnic/Voorwerf is the one location shown on the map for now;
+          // its count is set to the combined total until per-camera live
+          // counts are available.
+          locations: {
+            "MT-Picnic/Voorwerf": {
+              ...prev.locations["MT-Picnic/Voorwerf"],
+              count: summary.currentVisitors,
+            },
+          },
+          waterTempC: summary.waterTempC ?? prev.waterTempC,
+          weather: {
+            ...prev.weather,
+            tempC: summary.weatherTempC ?? prev.weather.tempC,
+          },
+          soundDb: summary.soundDb ?? prev.soundDb,
+        }));
+      } catch (err) {
+        console.error("Failed to load live summary:", err);
+      }
+    }
+
+    poll();
+    const intervalId = window.setInterval(poll, REFRESH_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
   return data;
 }
 
@@ -152,7 +196,7 @@ function StatCard({
 }
 
 export default function PublicDashboard() {
-  const data = useMockLiveData();
+  const data = useLiveData();
 
   const visitorStatuses = useMemo(
     () =>
@@ -214,7 +258,7 @@ export default function PublicDashboard() {
         <StatCard
           icon="🔊"
           label="Sound"
-          value={`${data.soundDb} dB`}
+          value={`${Math.round(data.soundDb)} dB`}
           color={STATUS_SCALE[soundStatus].color}
         />
       </div>
